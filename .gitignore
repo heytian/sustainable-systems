@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+env/
+venv/
+venv-1/
+.venv/
+.venv-1/
+
+# Data / outputs
+datasource/
+output/
+
+
+# Secrets
+.env
+
+# OS / editor
+.DS_Store
+.vscode/

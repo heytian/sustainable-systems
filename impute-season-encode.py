@@ -1,6 +1,6 @@
 """
-CO2 Imputation Comparison
-Methods: Mean, Interpolation, LSTM
+CO2 Imputation Comparison: K-NN, Interpolation, LSTM
+Season-stratified Masking + Seasonal Encoding
 """
 
 import numpy as np
@@ -20,9 +20,9 @@ EPOCHS     = 300
 LR         = 0.001
 MASK_RATE  = 0.2
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. LOAD FULL FILE IN CHUNKS → MONTHLY AGGREGATES
-# ─────────────────────────────────────────────────────────────────────────────
+
+# Load file
+
 chunks = []
 for chunk in pd.read_csv(FILE_PATH,
                           chunksize=200_000,
@@ -41,9 +41,9 @@ monthly = (pd.concat(chunks)
 print(f"Cities: {monthly['city'].nunique()} | "
       f"Date range: {monthly['month'].min()} → {monthly['month'].max()}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. SELECT BEST CITY BY TEMPORAL COVERAGE
-# ─────────────────────────────────────────────────────────────────────────────
+
+# Select best city by temporal coverage
+
 city_stats = monthly.groupby('city').agg(
     n_months=('month', 'nunique'),
     date_min=('month', 'min'),
@@ -62,9 +62,9 @@ print(f"\nCity     : {best_city}")
 print(f"Months   : {stats['n_months']}  |  "
       f"Span: {stats['span']}  |  Coverage: {stats['coverage']:.1%}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. BUILD CONTINUOUS MONTHLY SERIES
-# ─────────────────────────────────────────────────────────────────────────────
+
+# Build continuous monthly series
+
 city_df  = (monthly[monthly['city'] == best_city]
             .set_index('month')
             .sort_index())
@@ -82,34 +82,103 @@ series = (pd.Series(city_df['xco2'].values.astype(float))
 print(f"Series length   : {len(series)}")
 print(f"Structural gaps : {originally_missing.sum()}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. ARTIFICIAL MASKING (observed months only)
-# ─────────────────────────────────────────────────────────────────────────────
-observed_idx     = np.where(~originally_missing)[0]
-n_mask           = max(12, int(MASK_RATE * len(observed_idx)))
-masked_idx       = np.random.choice(observed_idx, size=n_mask, replace=False)
-mask             = np.zeros(len(series), dtype=bool)
-mask[masked_idx] = True
-x_missing        = series.copy()
-x_missing[mask]  = np.nan
 
-print(f"Masked points   : {mask.sum()}  ({mask.sum()/len(series):.1%})")
+# Normalize XCO2 for LSTM
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. BASELINE IMPUTERS
-# ─────────────────────────────────────────────────────────────────────────────
+scaler = StandardScaler()
+series_norm = scaler.fit_transform(series.reshape(-1, 1)).flatten()
+
+# Season-stratified masking
+
+def get_season(month):
+    """Map month (1-12) to season."""
+    if month in [12, 1, 2]:
+        return 'Winter'
+    elif month in [3, 4, 5]:
+        return 'Spring'
+    elif month in [6, 7, 8]:
+        return 'Summer'
+    else:  # 9, 10, 11
+        return 'Autumn'
+
+month_starts = full_idx.to_timestamp()
+months_arr = month_starts.month.values
+seasons_arr = np.array([get_season(m) for m in months_arr])
+
+print(f"Unique seasons: {np.unique(seasons_arr)}")
+print(f"Months array: {months_arr}")
+print(f"Seasons array: {seasons_arr}")
+
+observed_idx = np.where(~originally_missing)[0]
+print(f"Observed indices: {len(observed_idx)}")
+
+mask = np.zeros(len(series), dtype=bool)
+
+for season in ['Winter', 'Spring', 'Summer', 'Autumn']:
+    season_obs_idx = observed_idx[seasons_arr[observed_idx] == season]
+
+    print(f"  {season}: {len(season_obs_idx)} observed points")
+
+    if len(season_obs_idx) == 0:
+        continue
+
+    n_to_mask = max(2, int(MASK_RATE * len(season_obs_idx)))
+    chosen = np.random.choice(season_obs_idx, size=n_to_mask, replace=False)
+    mask[chosen] = True
+
+missing_norm = series_norm.copy()
+missing_norm[mask] = np.nan
+
+x_missing = series.copy()
+x_missing[mask] = np.nan
+
+print(f"\nMasking breakdown by season:")
+for season in ['Winter', 'Spring', 'Summer', 'Autumn']:
+    season_mask = mask & (seasons_arr == season)
+    if season_mask.sum() > 0:
+        print(f"  {season:8s}: {season_mask.sum():2d}  "
+              f"({season_mask.sum()/mask.sum()*100:5.1f}% of total masked)")
+
+print(f"\nTotal masked: {mask.sum()}  ({mask.sum()/len(series):.1%})")
+
+if mask.sum() == 0:
+    print("ERROR: No points masked! Check your data.")
+
+# Seasonal cycle encoding
+
+month_sin = np.sin(2 * np.pi * months_arr / 12)
+month_cos = np.cos(2 * np.pi * months_arr / 12)
+
+co2_cycle_month = (months_arr - 4) % 12  # April peak = 0
+cycle_sin = np.sin(2 * np.pi * co2_cycle_month / 12)
+cycle_cos = np.cos(2 * np.pi * co2_cycle_month / 12)
+
+mv_series = np.column_stack([
+    missing_norm,
+    month_sin,
+    month_cos,
+    cycle_sin,
+    cycle_cos
+])
+
+print(f"Multivariate shape: {mv_series.shape}")
+
+# Baseline imputation methods (memory less)
+
 # mean_pred   = np.where(mask, np.nanmean(x_missing), series)
 
 knn_raw     = KNNImputer(n_neighbors=5).fit_transform(
                   x_missing.reshape(-1, 1)).flatten()
 knn_pred    = np.where(mask, knn_raw, series)
 
+
+# Local neighbor interpolation imputation
+
 interp_pred = pd.Series(x_missing).interpolate().bfill().ffill().values
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. LSTM IMPUTER
-# ─────────────────────────────────────────────────────────────────────────────
+# LSTM imputation
+
 scaler       = StandardScaler()
 series_norm  = scaler.fit_transform(series.reshape(-1, 1)).flatten()
 missing_norm = series_norm.copy()
@@ -165,9 +234,8 @@ with torch.no_grad():
 lstm_pred = scaler.inverse_transform(
                 lstm_norm.reshape(-1, 1)).flatten()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. EVALUATION
-# ─────────────────────────────────────────────────────────────────────────────
+# Evaluation
+
 def rmse(pred, true, m):
     return np.sqrt(np.nanmean((pred[m] - true[m]) ** 2))
 
@@ -207,19 +275,17 @@ for name, pred in methods.items():
                else f"  {'N/A':>7}"
     print(row)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. PLOTS
-# ─────────────────────────────────────────────────────────────────────────────
+# Visual plots
+
 timestamps    = full_idx.to_timestamp()
 season_colors = {'Winter':"#b3d8ff",'Spring':"#b9fdb9",
                  'Summer':"#fceaad",'Autumn':"#fdc7b6"}
 
 fig, axes = plt.subplots(2, 1, figsize=(14, 9))
 
-# ── Panel 1: time series ──────────────────────────────────────────────────
+# Panel 1
 ax = axes[0]
 
-# Season shading (keep as is)
 labeled = set()
 for s, c in season_colors.items():
     idx    = np.where(seasons_arr == s)[0]
@@ -230,11 +296,9 @@ for s, c in season_colors.items():
                    alpha=0.18, color=c, label=lbl)
         labeled.add(s)
 
-# True series — full line
 ax.plot(timestamps, series, color='black', lw=2,
         label='True xCO₂', zorder=5)
 
-# Masked points — show where gaps are
 ax.scatter(timestamps[mask], series[mask],
            color='red', s=50, zorder=6, label='Masked (gap) points')
 
@@ -242,10 +306,8 @@ styles    = ['--', '-.', ':', '-']
 pal       = ["#0073CBFF", '#414487FF','#22A884FF']
 
 for (name, pred), ls, col in zip(methods.items(), styles, pal):
-    # Full faint line — shows where each method runs
     ax.plot(timestamps, pred, ls, lw=1.0,
             color=col, alpha=0.3)
-    # Bold dots only at masked positions — the actual imputed values
     ax.scatter(timestamps[mask], pred[mask],
                marker='o', s=35, color=col,
                label=name, zorder=7, alpha=0.9)
@@ -256,7 +318,7 @@ ax.set_ylabel('xCO₂ (ppm)')
 ax.legend(fontsize=8, ncol=4, loc='upper left')
 fig.autofmt_xdate()
 
-# ── Panel 2: RMSE by season ───────────────────────────────────────────────
+# Panel 2
 ax2   = axes[1]
 x_pos = np.arange(len(season_list))
 w     = 0.2
@@ -275,6 +337,6 @@ ax2.set_title(f'Imputation Error by Season — {best_city}')
 ax2.legend(fontsize=9)
 
 plt.tight_layout()
-plt.savefig('co2_imputation_comparison_no_seasonal_encoding.png', dpi=150, bbox_inches='tight')
+plt.savefig('co2_imputation_comparison.png', dpi=150, bbox_inches='tight')
 plt.show()
-print("\nSaved: co2_imputation_comparison_no_seasonal_encoding.png")
+print("\nSaved: co2_imputation_comparison.png")
