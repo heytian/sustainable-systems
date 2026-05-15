@@ -12,7 +12,7 @@ source .venv/bin/activate
 ```
 pip install -r requirements.txt
 ```
-3. Retrieve dataset "co2_sam.csv" from https://huggingface.co/datasets/heytian/oco-3 and place under a newly created folder in the root named 'datasource'
+3. Retrieve dataset "co2_sam.csv" from [Hugging Face](https://huggingface.co/datasets/heytian/oco-3) or [Google Drive (available until June 2026)](https://drive.google.com/drive/folders/1MKTNOHPP56XxDDP3cT0YXj-Rcw5gngge?usp=sharing) and place under a newly created folder in the root named 'datasource'
 
 4. Run each script
 ```
